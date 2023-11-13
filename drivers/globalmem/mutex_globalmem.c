@@ -18,6 +18,7 @@ module_param(globalmem_major, int, S_IRUGO);
 struct globalmem_dev {
     struct cdev cdev;
     unsigned char mem[GLOBALMEM_SIZE];
+    struct mutex mutex;
 };
 
 struct globalmem_dev *globalmem_devp;
@@ -41,6 +42,8 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
     if (count > GLOBALMEM_SIZE - p)
         count = GLOBALMEM_SIZE - p;
 
+    mutex_lock(&dev->mutex);
+
     if (copy_to_user(buf, dev->mem + p, count)) {
         ret = -EFAULT;
     } else {
@@ -49,6 +52,8 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
 
         printk(KERN_INFO "read %u bytes(s) from %lu\n", count, p);
     }
+
+    mutex_unlock(&dev->mutex);
 
     return ret;
 }
@@ -66,6 +71,8 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
     if (count > GLOBALMEM_SIZE - p)
         count = GLOBALMEM_SIZE - p;
 
+    mutex_lock(&dev->mutex);
+
     if (copy_from_user(dev->mem + p, buf, count))
         ret = -EFAULT;
     else {
@@ -74,6 +81,8 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
 
         printk(KERN_INFO "written %u bytes(s) from %lu\n", count, p);
     }
+
+    mutex_unlock(&dev->mutex);
 
     return ret;
 }
@@ -121,7 +130,9 @@ static long globalmem_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 
     switch (cmd) {
     case MEM_CLEAR:
+        mutex_lock(&dev->mutex);
         memset(dev->mem, 0, GLOBALMEM_SIZE);
+        mutex_unlock(&dev->mutex);
         printk(KERN_INFO "globalmem is set to zero\n");
         break;
     default:
@@ -170,20 +181,24 @@ static int __init globalmem_init(void)
 	dev_t devno = MKDEV(globalmem_major, 0);
 
     if (globalmem_major)
-        ret = register_chrdev_region(devno, 1, "globalmem");
+        ret = register_chrdev_region(devno, 1, "mutex_globalmem");
     else {
-        ret = alloc_chrdev_region(&devno, 0, 1, "globalmem");
+        ret = alloc_chrdev_region(&devno, 0, 1, "mutex_globalmem");
         globalmem_major = MAJOR(devno);
     }
     if (ret < 0)
         return ret;
     
+    // 为设备描述结构体分配内存
     globalmem_devp = kzalloc(sizeof(struct globalmem_dev), GFP_KERNEL);
     if (!globalmem_devp) {
         ret = -ENOMEM;
         goto fail_malloc;
     }
 
+    // 初始化互斥锁
+    mutex_init(&globalmem_devp->mutex);
+    // 初始化cdev结构体，并向内核添加一个字符设备
     globalmem_setup_cdev(globalmem_devp, 0);
     return 0;
 
