@@ -6,7 +6,10 @@
 #include <linux/uaccess.h>
 
 #define GLOBALMEM_SIZE 0x1000
-#define MEM_CLEAR 0x1
+#define GLOBALMEM_MAGIC 'g'
+// 内核还定义了_IO（）、_IOR（）、_IOW（）和_IOWR（）这4个宏来辅助生成命令
+// 由于globalmem的MEM_CLEAR命令不涉及数据传输，所以它可以定义为：
+#define MEM_CLEAR _IO(GLOBALMEM_MAGIC, 0)
 #define GLOBALMEM_MAJOR 230
 
 static int globalmem_major = GLOBALMEM_MAJOR;
@@ -25,6 +28,12 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
     unsigned int count = size;
     int ret = 0;
 
+    /*
+    大多数Linux驱动遵循一个"潜规则"，
+    那就是将文件的私有数据private_data指向设备结构体，
+    再用read（）、write（）、ioctl（）、llseek（）等函数
+    通过private_data访问设备结构体
+    */
     struct globalmem_dev *dev = filp->private_data;
 
     if (p >= GLOBALMEM_SIZE)
