@@ -32,9 +32,19 @@ struct globalfifo_dev {
     struct mutex mutex;
     wait_queue_head_t r_wait;
     wait_queue_head_t w_wait;
+    // 异步结构体指针
+    struct fasync_struct *async_queue;
 };
 
 struct globalfifo_dev *globalfifo_devp;
+
+
+// 支持异步通知的globalfifo设备驱动fasync（）函数
+static int globalfifo_fasync(int fd, struct file *filp, int mode)
+{
+    struct globalfifo_dev *dev = filp->private_data;
+    return fasync_helper(fd, filp, mode, &dev->async_queue);
+}
 
 static int globalfifo_open(struct inode *inode, struct file *filp)
 {
@@ -42,8 +52,11 @@ static int globalfifo_open(struct inode *inode, struct file *filp)
     return 0;
 }
 
+// 增加异步通知后的globalfifo设备驱动release（）函数
 static int globalfifo_release(struct inode *inode, struct file *filp)
 {
+    // 释放异步通知
+    globalfifo_fasync(-1, filp, 0);
     return 0;
 }
 
@@ -161,13 +174,19 @@ out2:
     set_current_state(TASK_RUNNING);
     return ret;
 }
+/*
+在globalfifo设备被正确写入之后，它变得可读，
+这个时候驱动应释放SIGIO信号，以便应用程序捕获
 
+支持异步通知的globalfifo设备驱动写函数
+*/
 static ssize_t globalfifo_write(struct file *filp, const char __user *buf, size_t count, loff_t *ppos)
 {
     int ret;
     struct globalfifo_dev *dev = filp->private_data;
 
     DECLARE_WAITQUEUE(wait, current);
+
     mutex_lock(&dev->mutex);
     add_wait_queue(&dev->w_wait, &wait);
 
@@ -207,6 +226,12 @@ static ssize_t globalfifo_write(struct file *filp, const char __user *buf, size_
 
         // 唤醒读进程
         wake_up_interruptible(&dev->r_wait);
+
+        if (dev->async_queue) {
+            // 向应用程序发送SIGIO信号
+            kill_fasync(&dev->async_queue, SIGIO, POLL_IN);
+            printk(KERN_DEBUG "%s kill SIGIO\n", __func__);
+        }
         ret = count;
     }
 
@@ -219,13 +244,14 @@ out2:
 }
 
 static const struct file_operations globalfifo_fops = {
-    .owner = THIS_MODULE,
-    .read = globalfifo_read,
-    .write = globalfifo_write,
-    .open = globalfifo_open,
-    .release = globalfifo_release,
-    .unlocked_ioctl = globalfifo_ioctl,
-    .poll = globalfifo_poll,
+	.owner = THIS_MODULE,
+	.read = globalfifo_read,
+	.write = globalfifo_write,
+	.unlocked_ioctl = globalfifo_ioctl,
+	.poll = globalfifo_poll,
+	.fasync = globalfifo_fasync,
+	.open = globalfifo_open,
+	.release = globalfifo_release,
 };
 
 // 初始化cdev结构体，并添加到内核
