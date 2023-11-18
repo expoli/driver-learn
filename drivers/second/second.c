@@ -109,18 +109,22 @@ static int __init second_init(void)
 
     ret = class_register(&second_class);
     if (ret < 0){
-        printk(KERN_ERR "Failed to register second class\n");
-        goto fail_class;
+        class_unregister(&second_class);
+        ret = class_register(&second_class);
+        if (ret < 0){
+            printk(KERN_ERR "Failed to register second class\n");
+            goto fail_class;
+        }
     }
     device_create(&second_class, NULL, MKDEV(second_major, 0), 
         NULL, "second" "%d", 0);
 
     return 0;
 
-fail_malloc:
-    unregister_chrdev_region(devno, 1);
 fail_class:
     kfree(second_devp);
+fail_malloc:
+    unregister_chrdev_region(devno, 1);
     return ret;
 }
 
@@ -131,6 +135,8 @@ static void __exit second_exit(void)
     cdev_del(&second_devp->cdev);   /* 删除 cdev */
     kfree(second_devp);             /* 释放设备结构体内存 */
     unregister_chrdev_region(MKDEV(second_major, 0), 1); /* 注销设备号 */
+    device_destroy(&second_class, MKDEV(second_major, 0));
+    class_unregister(&second_class);
 }
 
 module_exit(second_exit);
