@@ -2,6 +2,7 @@ KVERS = $(shell uname -r)
 
 # Kernel modules
 obj-m += second.o
+obj-m += clean_device.o
 
 # Specify flags for the module compilation.
 #EXTRA_CFLAGS=-g -O0
