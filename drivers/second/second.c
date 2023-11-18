@@ -27,6 +27,9 @@ struct second_dev {
 };
 
 static struct second_dev *second_devp;
+static const struct class second_class = {
+    .name = "second",
+};
 
 static void second_timer_handler(struct timer_list *timer)
 {
@@ -104,10 +107,20 @@ static int __init second_init(void)
 
     second_setup_cdev(second_devp, 0);
 
+    ret = class_register(&second_class);
+    if (ret < 0){
+        printk(KERN_ERR "Failed to register second class\n");
+        goto fail_class;
+    }
+    device_create(&second_class, NULL, MKDEV(second_major, 0), 
+        NULL, "second" "%d", 0);
+
     return 0;
 
 fail_malloc:
     unregister_chrdev_region(devno, 1);
+fail_class:
+    kfree(second_devp);
     return ret;
 }
 
