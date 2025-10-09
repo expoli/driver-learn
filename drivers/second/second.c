@@ -23,9 +23,7 @@ struct second_dev {
 };
 
 static struct second_dev *second_devp;
-static const struct class second_class = {
-    .name = "second",
-};
+static struct class *second_class;
 
 static void second_timer_handler(struct timer_list *timer)
 {
@@ -120,20 +118,44 @@ static int __init second_init(void)
         ret = alloc_chrdev_region(&devno, 0, 1, "second");
         second_major = MAJOR(devno);
     }
-    if (ret < 0)
+    if (ret < 0) {
         return ret;
+	}
+
+	printk("second_major: %d\n", second_major);
+    // 【修正 1】创建设备类 (class)
+    // 这是你缺失的关键一步
+    second_class = class_create("second_class");
+    if (IS_ERR(second_class)) {
+        printk(KERN_ERR "Failed to create the second class\n");
+        unregister_chrdev_region(devno, 1);
+        return PTR_ERR(second_class);
+    }
 
     second_devp = kzalloc(sizeof(struct second_dev), GFP_KERNEL);
     if (!second_devp) {
         ret = -ENOMEM;
-        goto fail_malloc;
+        goto fail_class;
     }
 
     second_setup_cdev(second_devp, 0);
 
-    return 0;
+    // 【修正 2】创建设备节点 (/dev/second0)
+    // 应该在 init 函数中调用，并使用正确的 devno (dev_t 类型)
+    if (device_create(second_class, NULL, devno, NULL, "second0") == NULL) {
+        printk(KERN_ERR "Failed to create the device\n");
+        ret = -EFAULT;
+        goto fail_cdev;
+    }
+    printk(KERN_INFO "second device initialized successfully\n");
 
-fail_malloc:
+    return 0;
+// 【修正 3】完善错误处理的 goto 标签
+fail_cdev:
+    cdev_del(&second_devp->cdev);
+    kfree(second_devp);
+fail_class:
+    class_destroy(second_class);
     unregister_chrdev_region(devno, 1);
     return ret;
 }
@@ -142,9 +164,14 @@ module_init(second_init);
 
 static void __exit second_exit(void)
 {
+	dev_t devno = MKDEV(second_major, 0);
+	// 顺序：销毁设备 -> 销毁类 -> 删除cdev -> 释放内存 -> 注销设备号
+    device_destroy(second_class, devno); // 使用正确的 devno (dev_t 类型)
+    class_destroy(second_class);
     cdev_del(&second_devp->cdev);   /* 删除 cdev */
     kfree(second_devp);             /* 释放设备结构体内存 */
-    unregister_chrdev_region(MKDEV(second_major, 0), 1); /* 注销设备号 */
+    unregister_chrdev_region(devno, 1); /* 注销设备号 */
+	printk(KERN_INFO "second device exited\n");
 }
 
 module_exit(second_exit);
