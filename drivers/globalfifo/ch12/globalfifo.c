@@ -19,7 +19,7 @@
 // 内核还定义了_IO（）、_IOR（）、_IOW（）和_IOWR（）这4个宏来辅助生成命令
 // 由于 globalfifi 的 FIFO_CLEAR 命令不涉及数据传输，所以它可以定义为：
 #define FIFO_CLEAR _IO(GLOBALFIFO_MAGIC, 0)
-#define GLOBALFIFO_MAJOR 231
+#define GLOBALFIFO_MAJOR 0
 
 static int globalfifo_major = GLOBALFIFO_MAJOR;
 module_param(globalfifo_major, int, S_IRUGO);
