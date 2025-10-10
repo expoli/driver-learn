@@ -11,10 +11,25 @@
 // 这个设备号将被传递给驱动
 static dev_t globalfifo_devt;
 
+/* --- 新增部分：Release 函数 --- */
+// 当设备的最后一个引用被释放时，内核会调用此函数
+// 因为我们的 platform_device 是静态分配的，所以这里无需做任何事
+static void globalfifo_pdev_release(struct device *dev)
+{
+    // 可以在这里添加打印，以确认函数被调用
+    pr_info("globalfifo_dev: release function called. Nothing to do for a static device.\n");
+}
+/* --- 新增部分结束 --- */
+
 // 定义 platform_device 实例
 static struct platform_device globalfifo_pdev = {
     .name = "globalfifo", // 这个名字是匹配的关键
     .id   = -1,           // 表明只有一个这样的设备
+    /* --- 修改部分：指定 release 函数 --- */
+    .dev = {
+        .release = globalfifo_pdev_release,
+    },
+    /* --- 修改部分结束 --- */
 };
 
 static int __init globalfifo_dev_init(void)
