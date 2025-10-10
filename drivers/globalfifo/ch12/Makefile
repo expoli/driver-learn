@@ -1,15 +1,14 @@
-KVERS = $(shell uname -r)
+# Makefile for globalfifo device and driver modules
 
-# Kernel modules
-obj-m += globalfifo.o
+KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
+PWD := $(shell pwd)
 
-# Specify flags for the module compilation.
-#EXTRA_CFLAGS=-g -O0
+# 目标模块对象，使用模块的基本名称
+obj-m += globalfifo_dev.o
+obj-m += globalfifo_drv.o
 
-build: kernel_modules
-
-kernel_modules:
-	make -C /lib/modules/$(KVERS)/build M=$(CURDIR) modules
+all:
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
 
 clean:
-	make -C /lib/modules/$(KVERS)/build M=$(CURDIR) clean
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean

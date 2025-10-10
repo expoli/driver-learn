@@ -7,22 +7,24 @@
  */
 
 #include <linux/module.h>
-#include <linux/types.h>
-#include <linux/sched.h>
-#include <linux/init.h>
+#include <linux/platform_device.h>
+#include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
+#include <linux/wait.h>
 #include <linux/poll.h>
+#include <linux/sched.h>
+#include <linux/uaccess.h>
 
 #define GLOBALFIFO_SIZE 0x1000
 #define GLOBALFIFO_MAGIC 'f'
 // 内核还定义了_IO（）、_IOR（）、_IOW（）和_IOWR（）这4个宏来辅助生成命令
 // 由于 globalfifi 的 FIFO_CLEAR 命令不涉及数据传输，所以它可以定义为：
 #define FIFO_CLEAR _IO(GLOBALFIFO_MAGIC, 0)
-#define GLOBALFIFO_MAJOR 0
 
-static int globalfifo_major = GLOBALFIFO_MAJOR;
-module_param(globalfifo_major, int, S_IRUGO);
+// 全局的 class 指针
+static struct class *globalfifo_class;
 
 // globalfifo设备结构体
 struct globalfifo_dev {
@@ -36,8 +38,6 @@ struct globalfifo_dev {
     struct fasync_struct *async_queue;
 };
 
-struct globalfifo_dev *globalfifo_devp;
-
 
 // 支持异步通知的globalfifo设备驱动fasync（）函数
 static int globalfifo_fasync(int fd, struct file *filp, int mode)
@@ -48,7 +48,9 @@ static int globalfifo_fasync(int fd, struct file *filp, int mode)
 
 static int globalfifo_open(struct inode *inode, struct file *filp)
 {
-    filp->private_data = globalfifo_devp;
+    // 通过 inode 中的 cdev 找到容器结构体的指针
+    struct globalfifo_dev *dev = container_of(inode->i_cdev, struct globalfifo_dev, cdev);
+    filp->private_data = dev;
     return 0;
 }
 
@@ -71,7 +73,7 @@ static long globalfifo_ioctl(struct file *filp, unsigned int cmd, unsigned long 
         memset(dev->mem, 0, GLOBALFIFO_SIZE);
         mutex_unlock(&dev->mutex);
 
-        printk(KERN_INFO "globalfifo is set to zero\n");
+        pr_info("globalfifo is set to zero\n");
         break;
 
     default:
@@ -159,7 +161,7 @@ static ssize_t globalfifo_read(struct file *filp, char __user *buf, size_t count
         memcpy(dev->mem, dev->mem + count, dev->current_len - count);
         // 更新设备中的数据长度
         dev->current_len -= count;
-        printk(KERN_INFO "read %u bytes(s), current_len: %u\n", count, dev->current_len);
+        pr_info("read %lu bytes(s), current_len: %u\n", count, dev->current_len);
 
         // 唤醒写进程
         wake_up_interruptible(&dev->w_wait);
@@ -222,7 +224,7 @@ static ssize_t globalfifo_write(struct file *filp, const char __user *buf, size_
         goto out;
     } else {
         dev->current_len += count;
-        printk(KERN_INFO "written %u bytes(s), current_len: %u\n", count, dev->current_len);
+        pr_info("written %lu bytes(s), current_len: %u\n", count, dev->current_len);
 
         // 唤醒读进程
         wake_up_interruptible(&dev->r_wait);
@@ -230,7 +232,7 @@ static ssize_t globalfifo_write(struct file *filp, const char __user *buf, size_
         if (dev->async_queue) {
             // 向应用程序发送SIGIO信号
             kill_fasync(&dev->async_queue, SIGIO, POLL_IN);
-            printk(KERN_DEBUG "%s kill SIGIO\n", __func__);
+            pr_debug("%s kill SIGIO\n", __func__);
         }
         ret = count;
     }
@@ -254,62 +256,93 @@ static const struct file_operations globalfifo_fops = {
 	.release = globalfifo_release,
 };
 
-// 初始化cdev结构体，并添加到内核
-static void globalfifo_setup_cdev(struct globalfifo_dev *dev, int index)
-{
-    int err, devno = MKDEV(globalfifo_major, index);
-
-    cdev_init(&dev->cdev, &globalfifo_fops);
-    dev->cdev.owner = THIS_MODULE;
-    err = cdev_add(&dev->cdev, devno, 1);
-    if (err)
-        printk(KERN_NOTICE "Error %d adding globalfifo%d", err, index);
-}
-
-static int __init globalfifo_init(void)
+// probe 函数：当内核匹配到同名 device 和 driver 时调用
+static int globalfifo_probe(struct platform_device *pdev)
 {
     int ret;
-    dev_t devno = MKDEV(globalfifo_major, 0);
-
-    if (globalfifo_major)
-        ret = register_chrdev_region(devno, 1, "globalfifo");
-    else {
-        ret = alloc_chrdev_region(&devno, 0, 1, "globalfifo");
-        globalfifo_major = MAJOR(devno);
+    dev_t devt;
+    struct globalfifo_dev *dev;
+    dev_t *p_devt = pdev->dev.platform_data; // 从 platform_device 获取数据
+    if (!p_devt) {
+        pr_err("globalfifo_drv: No device number found in platform_data\n");
+        return -EINVAL;
     }
-    if (ret < 0)
+    devt = *p_devt;
+    // 使用 devm_kzalloc，内核会在驱动卸载时自动释放内存
+    dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+    if (!dev) {
+        return -ENOMEM;
+    }
+    // 将设备实例指针存入 platform_device，以便 remove 函数可以访问
+    platform_set_drvdata(pdev, dev);
+    // 初始化 cdev 并添加到系统
+    cdev_init(&dev->cdev, &globalfifo_fops);
+    dev->cdev.owner = THIS_MODULE;
+    ret = cdev_add(&dev->cdev, devt, 1);
+    if (ret) {
+        pr_err("globalfifo_drv: Failed to add cdev\n");
         return ret;
-
-    // 为设备描述结构体分配内存
-    globalfifo_devp = kzalloc(sizeof(struct globalfifo_dev), GFP_KERNEL);
-    if (!globalfifo_devp) {
-        ret = -ENOMEM;
-        goto fail_malloc;
     }
 
-    globalfifo_setup_cdev(globalfifo_devp, 0);
+    // 初始化互斥锁和等待队列
+    mutex_init(&dev->mutex);
+    init_waitqueue_head(&dev->r_wait);
+    init_waitqueue_head(&dev->w_wait);
 
-    mutex_init(&globalfifo_devp->mutex);
-    // 初始化等待队列头
-    init_waitqueue_head(&globalfifo_devp->r_wait);
-    init_waitqueue_head(&globalfifo_devp->w_wait);
-
+    // 创建设备节点 /dev/globalfifo
+    device_create(globalfifo_class, NULL, devt, NULL, "globalfifo");
+    pr_info("globalfifo_drv: probed and initialized successfully\n");
     return 0;
+}
+// remove 函数：当设备或驱动被移除时调用
+static void globalfifo_remove(struct platform_device *pdev)
+{
+    struct globalfifo_dev *dev = platform_get_drvdata(pdev);
 
-fail_malloc:
-    unregister_chrdev_region(devno, 1);
+    // 按照与 probe 相反的顺序清理
+    device_destroy(globalfifo_class, dev->cdev.dev);
+    cdev_del(&dev->cdev);
+    // devm_kzalloc 分配的内存无需手动释放
+    pr_info("globalfifo_drv: removed\n");
+}
+// 定义 platform_driver 结构体
+static struct platform_driver globalfifo_platform_driver = {
+    .driver = {
+        .name = "globalfifo", // 这个名字是匹配的关键
+    },
+    .probe = globalfifo_probe,
+    .remove = globalfifo_remove,
+};
+
+
+static int __init globalfifo_drv_init(void)
+{
+    int ret;
+
+    // 1. 创建 class
+    globalfifo_class = class_create("globalfifo_class");
+    if (IS_ERR(globalfifo_class)) {
+        pr_err("globalfifo_drv: Failed to create class\n");
+        return PTR_ERR(globalfifo_class);
+    }
+        
+    // 2. 注册 platform driver
+    ret = platform_driver_register(&globalfifo_platform_driver);
+    if (ret) {
+        pr_err("globalfifo_drv: Failed to register platform driver\n");
+        class_destroy(globalfifo_class);
+    }
     return ret;
 }
-module_init(globalfifo_init);
 
-static void __exit globalfifo_exit(void)
+static void __exit globalfifo_drv_exit(void)
 {
-    cdev_del(&globalfifo_devp->cdev);
-    kfree(globalfifo_devp);
-    unregister_chrdev_region(MKDEV(globalfifo_major, 0), 1);
+    platform_driver_unregister(&globalfifo_platform_driver);
+    class_destroy(globalfifo_class);
 }
 
-module_exit(globalfifo_exit);
+module_init(globalfifo_drv_init);
+module_exit(globalfifo_drv_exit);
 
 MODULE_AUTHOR("Cuyu Tang <me@expoli.tech>");
 MODULE_LICENSE("GPL v2");
